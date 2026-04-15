@@ -73,3 +73,14 @@ Logs:
 
 - `~/.pi/agent/pi-cc-bridge.log`
 - `~/.pi/agent/pi-cc-bridge-diag.log`
+
+## Credits
+
+Built on top of:
+
+- [Pi](https://github.com/mariozechner/pi-coding-agent) — the host agent, tool system, and extension runtime
+- [`@mariozechner/pi-ai`](https://www.npmjs.com/package/@mariozechner/pi-ai) — Pi model/provider interfaces
+- [Anthropic Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk) — Claude-side agent/session/runtime layer
+- [Anthropic SDK](https://www.npmjs.com/package/@anthropic-ai/sdk) — API types and client primitives
+
+This bridge exists to connect those pieces into a Pi-native Claude provider.
