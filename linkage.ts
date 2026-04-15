@@ -7,6 +7,10 @@ import { debug } from "./logging";
 
 const DB_PATH = join(homedir(), ".pi", "agent", "pi-cc-bridge.db");
 
+export function getBridgeDbPath() {
+  return DB_PATH;
+}
+
 export interface PersistedBridgeSession {
   piSessionId: string;
   cwd: string;

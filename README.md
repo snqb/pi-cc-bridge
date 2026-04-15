@@ -91,6 +91,18 @@ Logs:
 - `~/.pi/agent/pi-cc-bridge.log`
 - `~/.pi/agent/pi-cc-bridge-diag.log`
 
+Interactive command:
+
+```text
+/pi-cc-bridge-status
+```
+
+## Smoke test
+
+```bash
+npm run smoke
+```
+
 ## Credits
 
 Built on top of:

@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { loadBridgeSession, persistBridgeSessionLink, touchBridgeSession, clearBridgeSessionLink } from "./linkage";
 import { loadConfig } from "./config";
@@ -6,6 +7,7 @@ import { setDebug, debug } from "./logging";
 import { MODELS, PROVIDER_ID } from "./models";
 import { BridgeRuntime } from "./runtime";
 import { createProvider } from "./provider";
+import { buildBridgeStatus, findDuplicateBridgeInstalls } from "./status";
 
 function readPiSessionId(sessionFile?: string): string | undefined {
   if (!sessionFile) return undefined;
@@ -23,6 +25,8 @@ export default function (pi: ExtensionAPI) {
   const config = loadConfig(process.cwd());
   setDebug(Boolean(config.debug));
   const runtime = new BridgeRuntime();
+  const extensionPath = fileURLToPath(import.meta.url);
+  let duplicateWarningShown = false;
 
   debug("loading", { provider: PROVIDER_ID, profile: config.behaviorProfile });
 
@@ -38,6 +42,12 @@ export default function (pi: ExtensionAPI) {
     const cwd = ctx.sessionManager.getCwd();
     runtime.currentPiSessionId = piSessionId;
     runtime.currentCwd = cwd;
+
+    const duplicates = findDuplicateBridgeInstalls(cwd);
+    if (!duplicateWarningShown && duplicates.sources.length > 1) {
+      duplicateWarningShown = true;
+      ctx.ui.notify(`pi-cc-bridge duplicate installs detected: ${duplicates.sources.join(" | ")}`, "warning");
+    }
 
     if (event.reason === "resume") {
       const previousPiSessionId = readPiSessionId(event.previousSessionFile);
@@ -71,6 +81,14 @@ export default function (pi: ExtensionAPI) {
     } else {
       runtime.clearSharedSession();
     }
+  });
+
+  pi.registerCommand("pi-cc-bridge-status", {
+    description: "Show pi-cc-bridge session/linkage status",
+    handler: async (_args, ctx) => {
+      const lines = await buildBridgeStatus(runtime, ctx, extensionPath);
+      await ctx.ui.select("pi-cc-bridge status", lines);
+    },
   });
 
   pi.registerProvider(PROVIDER_ID, {
