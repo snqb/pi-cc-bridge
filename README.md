@@ -50,7 +50,7 @@ This bridge is for people who want:
 - Claude quality
 - Pi tools
 - Pi orchestration
-- less Claude-Code-ish wandering
+- a more focused Pi-style workflow
 
 It is **not** trying to reproduce Claude Code exactly.
 

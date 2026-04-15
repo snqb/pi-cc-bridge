@@ -24,11 +24,10 @@ const TOOL_MAPPING = `Tool naming note:
 - Call the corresponding available MCP tools even if transport names are prefixed.`;
 
 const BROWSER_RULES = `Browser automation note:
-- If using ~/.pi/agent/skills/browser-testing/browser.js (ABP CLI), do NOT use Playwright-style selectors with click/hover/drag helpers.
-- browser.js click/hover/drag expect coordinates, not selector strings like text=... or css selectors.
-- First inspect with observe, screenshot --markup clickable,typeable,grid, text, eval, or pick; then click using coordinates.
-- If a browser.js command prints usage/help instead of action output, treat that as a failed command, explain briefly, and recover with the correct ABP workflow.`;
-
+- Some Pi browser tools are coordinate-based rather than selector-based.
+- Do not assume Playwright-style click("text=...") support unless the tool clearly supports it.
+- Inspect first, then act using the browser tool's actual interface.
+- If a browser command prints usage/help instead of action output, treat that as a failed command, explain briefly, and recover with the correct workflow.`;
 function extractSkillsCatalog(baseSystemPrompt?: string): string {
   if (!baseSystemPrompt) return "";
   const start = baseSystemPrompt.indexOf("<available_skills>");
