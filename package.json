@@ -2,24 +2,40 @@
   "name": "pi-cc-bridge",
   "version": "0.3.0-alpha.1",
   "private": false,
-  "description": "Pi extension that uses Claude Agent SDK as a Pi-native provider, preserving Pi behavior and Pi-side tool execution.",
+  "description": "Claude provider bridge for Pi that preserves Pi tool execution and Pi-style workflow.",
   "keywords": [
     "pi-package",
     "pi",
+    "pi-coding-agent",
     "extension",
-    "claude-code",
+    "provider",
+    "claude",
     "claude-agent-sdk"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/snqb/pi-cc-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/snqb/pi-cc-bridge/issues"
+  },
+  "homepage": "https://github.com/snqb/pi-cc-bridge#readme",
   "engines": {
     "node": ">=20"
   },
   "files": [
     "*.ts",
     "*.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "type": "module",
+  "scripts": {
+    "clean": "echo 'nothing to clean'",
+    "build": "echo 'nothing to build'",
+    "check": "tsc --noEmit --target ES2022 --module ESNext --moduleResolution Bundler --skipLibCheck index.ts provider.ts runtime.ts tools.ts config.ts logging.ts models.ts prompt.ts"
+  },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.84",
     "@anthropic-ai/sdk": "^0.73.0",
