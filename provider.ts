@@ -37,6 +37,27 @@ const newAssistantMessageEventStream: () => AssistantMessageEventStream =
     ? _piAi.createAssistantMessageEventStream
     : () => new _piAi.AssistantMessageEventStream();
 
+function bridgeErrorMessage(model: Model<any>, errorText: string) {
+  return {
+    role: "assistant" as const,
+    content: [],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "error" as const,
+    timestamp: Date.now(),
+    errorMessage: errorText,
+  };
+}
+
 function mapStopReason(reason: string | undefined): "stop" | "length" | "toolUse" {
   switch (reason) {
     case "tool_use": return "toolUse";
@@ -270,7 +291,7 @@ export function createProvider(runtime: BridgeRuntime, config: BridgeConfig) {
         runtime.abortActiveRun("Superseded by new user message");
       } else {
         queueMicrotask(() => {
-          stream.push({ type: "error", reason: "error", error: { role: "assistant", content: [], errorMessage: "Bridge was waiting for tool results but none were provided." } as any });
+          stream.push({ type: "error", reason: "error", error: bridgeErrorMessage(model, "Bridge was waiting for tool results but none were provided.") as any });
           stream.end();
         });
         return stream;
@@ -279,7 +300,7 @@ export function createProvider(runtime: BridgeRuntime, config: BridgeConfig) {
 
     if (!lastMessage || lastMessage.role !== "user") {
       queueMicrotask(() => {
-        stream.push({ type: "error", reason: "error", error: { role: "assistant", content: [], errorMessage: "Bridge expected a user message to start a query." } as any });
+        stream.push({ type: "error", reason: "error", error: bridgeErrorMessage(model, "Bridge expected a user message to start a query.") as any });
         stream.end();
       });
       return stream;
