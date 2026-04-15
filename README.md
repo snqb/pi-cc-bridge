@@ -34,6 +34,23 @@ If you want Claude to be the default for Pi, set this in your settings:
 
 Start a fresh Pi process after installing or changing the default provider.
 
+## Authentication
+
+`pi-cc-bridge` does **not** add a separate Pi-side login flow.
+
+Authenticate Claude Code itself, then Pi will reuse that auth:
+
+```bash
+claude auth login
+claude auth status
+```
+
+In practice:
+
+- log in with the `claude` CLI, not through a special `/login` flow in Pi
+- once `claude auth status` looks good, `pi-cc-bridge` can use that session
+- if Claude Code is logged out, the bridge cannot talk to Claude
+
 ## What it does
 
 - uses Claude through the Claude Agent SDK
@@ -82,5 +99,6 @@ Built on top of:
 - [`@mariozechner/pi-ai`](https://www.npmjs.com/package/@mariozechner/pi-ai) — Pi model/provider interfaces
 - [Anthropic Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk) — Claude-side agent/session/runtime layer
 - [Anthropic SDK](https://www.npmjs.com/package/@anthropic-ai/sdk) — API types and client primitives
+- [elidickinson/pi-claude-bridge](https://github.com/elidickinson/pi-claude-bridge) — earlier bridge work that helped inform this direction
 
 This bridge exists to connect those pieces into a Pi-native Claude provider.
