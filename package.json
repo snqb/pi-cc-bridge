@@ -39,6 +39,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.84",
     "@anthropic-ai/sdk": "^0.73.0",
+    "@libsql/client": "^0.17.2",
     "change-case": "^5.4.4"
   },
   "peerDependencies": {

@@ -8,6 +8,7 @@ import type {
 import { query, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { BridgeConfig } from "./config";
 import { debug, diag } from "./logging";
+import { clearBridgeSessionLink, loadBridgeSession, persistBridgeSessionLink, setBridgeSessionState, touchBridgeSession } from "./linkage";
 import { compileSystemPrompt } from "./prompt";
 import { BridgeRuntime, updateUsage } from "./runtime";
 import {
@@ -37,6 +38,8 @@ const newAssistantMessageEventStream: () => AssistantMessageEventStream =
     ? _piAi.createAssistantMessageEventStream
     : () => new _piAi.AssistantMessageEventStream();
 
+const MAX_TRANSIENT_RETRIES = 2;
+
 function bridgeErrorMessage(model: Model<any>, errorText: string) {
   return {
     role: "assistant" as const,
@@ -56,6 +59,42 @@ function bridgeErrorMessage(model: Model<any>, errorText: string) {
     timestamp: Date.now(),
     errorMessage: errorText,
   };
+}
+
+function isRawApiErrorText(text: string): boolean {
+  return /^\s*API Error:\s*\d{3}\b/i.test(text.trim());
+}
+
+function isTransientClaudeError(text: string): boolean {
+  return /API Error:\s*(500|502|503|504)\b/i.test(text)
+    || /Internal server error/i.test(text)
+    || /overloaded/i.test(text)
+    || /ECONNRESET|ETIMEDOUT|socket hang up/i.test(text);
+}
+
+function summarizeErrorForUser(text: string): string {
+  const trimmed = text.trim();
+  const apiMatch = trimmed.match(/API Error:\s*(\d{3})\b[\s\S]*/i);
+  if (apiMatch) {
+    const code = apiMatch[1];
+    if (["500", "502", "503", "504"].includes(code)) return `API Error: ${code} · check status.claude.com`;
+    return `API Error: ${code}`;
+  }
+  if (/OAuth authentication is currently not allowed for this organization/i.test(trimmed)) {
+    return "Claude Code auth failed: OAuth isn't allowed for this organization.";
+  }
+  return trimmed.replace(/^Error:\s*/, "");
+}
+
+function setCleanErrorOutput(run: ReturnType<BridgeRuntime["startRun"]>, model: Model<any>, rawErrorText: string) {
+  const error = bridgeErrorMessage(model, rawErrorText) as any;
+  error.content = [{ type: "text", text: summarizeErrorForUser(rawErrorText) }];
+  run.turnOutput = error;
+  run.turnBlocks = error.content;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function mapStopReason(reason: string | undefined): "stop" | "length" | "toolUse" {
@@ -166,6 +205,7 @@ function processAssistantMessage(run: ReturnType<BridgeRuntime["startRun"]>, mes
 
   for (const block of assistantMsg.content) {
     if (block.type === "text" && block.text) {
+      if (isRawApiErrorText(block.text)) continue;
       run.ensureStarted();
       run.turnBlocks.push({ type: "text", text: block.text });
       const idx = run.turnBlocks.length - 1;
@@ -201,63 +241,100 @@ function processAssistantMessage(run: ReturnType<BridgeRuntime["startRun"]>, mes
   }
 }
 
-async function consumeQuery(runtime: BridgeRuntime, run: ReturnType<BridgeRuntime["startRun"]>, sdkQuery: ReturnType<typeof query>, customToolNameToPi: Map<string, string>, model: Model<any>, contextMessageCount: number, cwd: string) {
-  let done = false;
-  let capturedSessionId: string | undefined;
-  try {
-    for await (const message of sdkQuery) {
-      if (run.finalized) break;
-      switch (message.type) {
-        case "stream_event":
-          processStreamEvent(run, message, customToolNameToPi, model);
-          break;
-        case "assistant":
-          processAssistantMessage(run, message, model, customToolNameToPi);
-          break;
-        case "result": {
-          if (!run.turnSawStreamEvent && message.subtype === "success" && (message as any).result) {
-            run.ensureStarted();
-            const text = (message as any).result || "";
-            run.turnBlocks.push({ type: "text", text });
-            const idx = run.turnBlocks.length - 1;
-            run.push({ type: "text_start", contentIndex: idx, partial: run.turnOutput });
-            run.push({ type: "text_delta", contentIndex: idx, delta: text, partial: run.turnOutput });
-            run.push({ type: "text_end", contentIndex: idx, content: text, partial: run.turnOutput });
+async function consumeQuery(runtime: BridgeRuntime, run: ReturnType<BridgeRuntime["startRun"]>, makeSdkQuery: () => ReturnType<typeof query>, customToolNameToPi: Map<string, string>, model: Model<any>, contextMessageCount: number, cwd: string) {
+  let attempt = 0;
+
+  while (true) {
+    let done = false;
+    let capturedSessionId: string | undefined;
+    const sdkQuery = makeSdkQuery();
+    run.sdkQuery = sdkQuery;
+
+    try {
+      for await (const message of sdkQuery) {
+        if (run.finalized) break;
+        switch (message.type) {
+          case "stream_event":
+            processStreamEvent(run, message, customToolNameToPi, model);
+            break;
+          case "assistant":
+            if ((message as any).session_id) capturedSessionId = (message as any).session_id;
+            processAssistantMessage(run, message, model, customToolNameToPi);
+            break;
+          case "result": {
+            if ((message as any).session_id) capturedSessionId = (message as any).session_id;
+            if (!run.turnSawStreamEvent && message.subtype === "success" && (message as any).result) {
+              run.ensureStarted();
+              const text = (message as any).result || "";
+              if (!isRawApiErrorText(text)) {
+                run.turnBlocks.push({ type: "text", text });
+                const idx = run.turnBlocks.length - 1;
+                run.push({ type: "text_start", contentIndex: idx, partial: run.turnOutput });
+                run.push({ type: "text_delta", contentIndex: idx, delta: text, partial: run.turnOutput });
+                run.push({ type: "text_end", contentIndex: idx, content: text, partial: run.turnOutput });
+              }
+            }
+            if (run.turnOutput && (message as any).usage && run.turnOutput.usage.totalTokens === 0) {
+              updateUsage(run.turnOutput, (message as any).usage, model);
+            }
+            break;
           }
-          if (run.turnOutput && (message as any).usage && run.turnOutput.usage.totalTokens === 0) {
-            updateUsage(run.turnOutput, (message as any).usage, model);
+          case "system": {
+            if ((message as any).subtype === "init" && (message as any).session_id) {
+              capturedSessionId = (message as any).session_id;
+            }
+            break;
           }
-          break;
-        }
-        case "system": {
-          if ((message as any).subtype === "init" && (message as any).session_id) {
-            capturedSessionId = (message as any).session_id;
-          }
-          break;
         }
       }
+      done = true;
+    } catch (error) {
+      const raw = errorMessage(error);
+      debug("consumeQuery error", run.id, raw, { attempt });
+      runtime.clearSharedSession();
+      const aborted = run.state === "aborted" || run.finalized;
+      const canRetry = !aborted && !run.turnStarted && isTransientClaudeError(raw) && attempt < MAX_TRANSIENT_RETRIES;
+      if (canRetry) {
+        attempt += 1;
+        diag("transient_retry", { runId: run.id, attempt, error: summarizeErrorForUser(raw) });
+        run.resetTurn(model);
+        await sleep(500 * attempt);
+        continue;
+      }
+      run.state = aborted ? "aborted" : "error";
+      await clearBridgeSessionLink(run.piSessionId);
+      if (!aborted) setCleanErrorOutput(run, model, raw);
+      run.finalize(aborted ? "aborted" : "error", raw);
+      runtime.clearRun(run);
+      return;
+    } finally {
+      try { sdkQuery.close(); } catch {}
+      if (run.sdkQuery === sdkQuery) run.sdkQuery = null;
     }
-    done = true;
-  } catch (error) {
-    debug("consumeQuery error", run.id, errorMessage(error));
-    runtime.clearSharedSession();
-    const aborted = run.state === "aborted" || run.finalized;
-    run.state = aborted ? "aborted" : "error";
-    run.finalize(aborted ? "aborted" : "error", errorMessage(error));
+
+    if (!done || run.finalized) return;
+    if (capturedSessionId) {
+      runtime.sharedSession = { sessionId: capturedSessionId, cursor: contextMessageCount, cwd };
+      await persistBridgeSessionLink({
+        piSessionId: run.piSessionId,
+        cwd,
+        provider: model.provider,
+        model: model.id,
+        liveClaudeSessionId: capturedSessionId,
+        liveCursor: contextMessageCount,
+        state: run.state === "waiting_tool_results" ? "waiting_tool_results" : "idle",
+      });
+      debug("captured session", { runId: run.id, sessionId: capturedSessionId, cursor: contextMessageCount });
+    } else if (run.piSessionId) {
+      await setBridgeSessionState(run.piSessionId, run.state === "waiting_tool_results" ? "waiting_tool_results" : "idle");
+    }
+    if (run.state === "waiting_tool_results") return;
+    run.state = "done";
+    if (run.piSessionId) await setBridgeSessionState(run.piSessionId, "idle");
+    run.finalize(run.turnOutput?.stopReason === "length" ? "length" : "stop");
     runtime.clearRun(run);
     return;
-  } finally {
-    try { sdkQuery.close(); } catch {}
   }
-
-  if (!done || run.finalized || run.state === "waiting_tool_results") return;
-  if (capturedSessionId) {
-    runtime.sharedSession = { sessionId: capturedSessionId, cursor: contextMessageCount, cwd };
-    debug("captured session", { runId: run.id, sessionId: capturedSessionId, cursor: contextMessageCount });
-  }
-  run.state = "done";
-  run.finalize(run.turnOutput?.stopReason === "length" ? "length" : "stop");
-  runtime.clearRun(run);
 }
 
 export function createProvider(runtime: BridgeRuntime, config: BridgeConfig) {
@@ -306,71 +383,90 @@ export function createProvider(runtime: BridgeRuntime, config: BridgeConfig) {
       return stream;
     }
 
-    const run = runtime.startRun(stream, model);
     const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context);
-    const mcpServers = buildMcpServers(run, mcpTools);
     const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
+    const piSessionId = options?.sessionId ?? runtime.currentPiSessionId ?? undefined;
     const priorMessages = context.messages.slice(0, -1);
-    let resumeSessionId: string | undefined;
-    let replayTranscript: string | undefined;
-
-    const shared = runtime.sharedSession;
-    if (shared && shared.cwd === cwd) {
-      const missed = priorMessages.slice(shared.cursor);
-      const trailingAssistantOnly = missed.length === 1 && (missed[0] as { role?: string }).role === "assistant";
-      if (missed.length === 0 || trailingAssistantOnly) {
-        resumeSessionId = shared.sessionId;
-        if (trailingAssistantOnly) {
-          runtime.sharedSession = { ...shared, cursor: priorMessages.length };
-        }
-      }
-    }
-
-    if (!resumeSessionId && priorMessages.length > 0) {
-      replayTranscript = renderReplayTranscript(priorMessages);
-    }
-
     const promptBlocks = extractUserPromptBlocks(context.messages);
     const promptText = extractUserPrompt(context.messages) ?? "[continue]";
-    const prompt = replayTranscript
-      ? wrapReplayPromptStream(replayTranscript, promptBlocks ?? promptText)
-      : promptBlocks
-        ? wrapPromptStream(promptBlocks)
-        : promptText;
-    const systemPrompt = compileSystemPrompt(config.behaviorProfile ?? "vanilla", context.systemPrompt);
-    debug("fresh query", {
-      runId: run.id,
-      profile: config.behaviorProfile ?? "vanilla",
-      promptLength: promptText.length,
-      systemPromptLength: systemPrompt.length,
-      tools: mcpTools.length,
-      resume: Boolean(resumeSessionId),
-      priorMessages: priorMessages.length,
-      replayTranscriptLength: replayTranscript?.length ?? 0,
-    });
 
-    const sdkQuery = query({
-      prompt,
-      options: {
-        cwd,
-        permissionMode: "bypassPermissions",
-        includePartialMessages: true,
-        disallowedTools: DISALLOWED_BUILTIN_TOOLS,
-        allowedTools: [`${mcpServers ? "mcp__custom-tools__*" : ""}`].filter(Boolean),
-        systemPrompt,
-        settingSources: ["user", "project"] as SettingSource[],
-        extraArgs: { model: model.id, "strict-mcp-config": null },
-        ...(mcpServers ? { mcpServers } : {}),
-        ...(resumeSessionId ? { resume: resumeSessionId } : {}),
-      },
-    });
+    void (async () => {
+      await touchBridgeSession(piSessionId, cwd, model.provider, model.id);
 
-    run.sdkQuery = sdkQuery;
+      let shared = runtime.sharedSession;
+      if (!shared) {
+        const persisted = await loadBridgeSession(piSessionId);
+        if (persisted?.state === "waiting_tool_results") {
+          await clearBridgeSessionLink(piSessionId);
+        } else if (persisted?.liveClaudeSessionId && persisted.cwd === cwd) {
+          shared = { sessionId: persisted.liveClaudeSessionId, cursor: persisted.liveCursor, cwd: persisted.cwd };
+          runtime.sharedSession = shared;
+        }
+      }
 
-    void consumeQuery(runtime, run, sdkQuery, customToolNameToPi, model, context.messages.length, cwd)
-      .finally(() => {
-        run.clearAbortBinding();
+      const run = runtime.startRun(stream, model);
+      run.piSessionId = piSessionId;
+      run.cwd = cwd;
+      const mcpServers = buildMcpServers(run, mcpTools);
+      let resumeSessionId: string | undefined;
+      let replayTranscript: string | undefined;
+
+      if (shared && shared.cwd === cwd) {
+        const missed = priorMessages.slice(shared.cursor);
+        const trailingAssistantOnly = missed.length === 1 && (missed[0] as { role?: string }).role === "assistant";
+        if (missed.length === 0 || trailingAssistantOnly) {
+          resumeSessionId = shared.sessionId;
+          if (trailingAssistantOnly) {
+            runtime.sharedSession = { ...shared, cursor: priorMessages.length };
+          }
+        }
+      }
+
+      if (!resumeSessionId && priorMessages.length > 0) {
+        replayTranscript = renderReplayTranscript(priorMessages);
+      }
+
+      const prompt = replayTranscript
+        ? wrapReplayPromptStream(replayTranscript, promptBlocks ?? promptText)
+        : promptBlocks
+          ? wrapPromptStream(promptBlocks)
+          : promptText;
+      const systemPrompt = compileSystemPrompt(config.behaviorProfile ?? "vanilla", context.systemPrompt);
+      debug("fresh query", {
+        runId: run.id,
+        profile: config.behaviorProfile ?? "vanilla",
+        promptLength: promptText.length,
+        systemPromptLength: systemPrompt.length,
+        tools: mcpTools.length,
+        resume: Boolean(resumeSessionId),
+        priorMessages: priorMessages.length,
+        replayTranscriptLength: replayTranscript?.length ?? 0,
       });
+
+      const makeSdkQuery = () => query({
+        prompt,
+        options: {
+          cwd,
+          permissionMode: "bypassPermissions",
+          includePartialMessages: true,
+          disallowedTools: DISALLOWED_BUILTIN_TOOLS,
+          allowedTools: [`${mcpServers ? "mcp__custom-tools__*" : ""}`].filter(Boolean),
+          systemPrompt,
+          settingSources: ["user", "project"] as SettingSource[],
+          extraArgs: { model: model.id, "strict-mcp-config": null },
+          ...(mcpServers ? { mcpServers } : {}),
+          ...(resumeSessionId ? { resume: resumeSessionId } : {}),
+        },
+      });
+
+      await consumeQuery(runtime, run, makeSdkQuery, customToolNameToPi, model, context.messages.length, cwd);
+      run.clearAbortBinding();
+    })().catch((error) => {
+      queueMicrotask(() => {
+        stream.push({ type: "error", reason: "error", error: bridgeErrorMessage(model, errorMessage(error)) as any });
+        stream.end();
+      });
+    });
 
     return stream;
   };

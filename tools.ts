@@ -99,26 +99,43 @@ export async function* wrapPromptStream(blocks: ContentBlockParam[]): AsyncItera
   };
 }
 
+function sanitizeReplaySnippet(text: string, limit = 240): string {
+  const cleaned = text
+    .replace(/_Mark facts from these results with .*$/gim, "")
+    .replace(/Loading vectors\.*/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "";
+  return cleaned.length > limit ? `${cleaned.slice(0, limit - 1)}…` : cleaned;
+}
+
 export function renderReplayTranscript(messages: Context["messages"]): string {
   const lines: string[] = [];
   for (const msg of messages) {
     if (msg.role === "user") {
       const text = typeof msg.content === "string" ? msg.content : messageContentToText(msg.content);
-      if (text) lines.push(`User: ${text}`);
+      const snippet = sanitizeReplaySnippet(text, 400);
+      if (snippet) lines.push(`User: ${snippet}`);
     } else if (msg.role === "assistant") {
       const content = Array.isArray(msg.content) ? msg.content : [];
       const textParts: string[] = [];
       const toolParts: string[] = [];
       for (const block of content) {
-        if (block.type === "text" && block.text) textParts.push(block.text);
-        else if (block.type === "toolCall") toolParts.push(`${block.name}(${JSON.stringify(block.arguments ?? {})})`);
+        if (block.type === "text" && block.text) {
+          const snippet = sanitizeReplaySnippet(block.text, 280);
+          if (snippet) textParts.push(snippet);
+        } else if (block.type === "toolCall") toolParts.push(`${block.name}(${JSON.stringify(block.arguments ?? {})})`);
       }
       if (textParts.length) lines.push(`Assistant: ${textParts.join("\n")}`);
       if (toolParts.length) lines.push(`Assistant tools: ${toolParts.join(", ")}`);
     } else if (msg.role === "toolResult") {
-      const text = messageContentToText(msg.content);
+      const text = sanitizeReplaySnippet(messageContentToText(msg.content), 160);
       const prefix = msg.isError ? "Tool error" : "Tool result";
-      if (text) lines.push(`${prefix} [${msg.toolName}]: ${text}`);
+      if (msg.isError && text) {
+        lines.push(`${prefix} [${msg.toolName}]: ${text}`);
+      } else {
+        lines.push(`${prefix} [${msg.toolName}]: output omitted`);
+      }
     }
   }
   return lines.join("\n\n");

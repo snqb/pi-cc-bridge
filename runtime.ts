@@ -2,6 +2,7 @@ import type { AssistantMessage, AssistantMessageEventStream, Model } from "@mari
 import type { query } from "@anthropic-ai/claude-agent-sdk";
 import { calculateCost } from "@mariozechner/pi-ai";
 import type { McpResult, PendingToolCall } from "./tools";
+import { clearBridgeSessionLink } from "./linkage";
 import { debug, diag } from "./logging";
 
 export type RunState =
@@ -32,6 +33,8 @@ export class Run {
   closing = false;
   abortSignal: AbortSignal | null = null;
   abortHandler: (() => void) | null = null;
+  piSessionId?: string;
+  cwd?: string;
 
   constructor(stream: AssistantMessageEventStream, model: Model<any>) {
     this.stream = stream;
@@ -111,14 +114,8 @@ export class Run {
   }
 
   finalize(reason: "stop" | "length" | "error" | "aborted", errorMessage?: string) {
-     if (this.finalized || this.closing) return;
-+    this.clearAbortBinding();
-     if (!this.turnStarted) this.ensureStarted();
-     if (this.turnOutput) {
-       this.turnOutput.stopReason = reason === "length" ? "length" : reason === "stop" ? (this.turnOutput.stopReason ?? "stop") : reason;
-       if (errorMessage) this.turnOutput.errorMessage = errorMessage;
-     }
     if (this.finalized || this.closing) return;
+    this.clearAbortBinding();
     if (!this.turnStarted) this.ensureStarted();
     if (this.turnOutput) {
       this.turnOutput.stopReason = reason === "length" ? "length" : reason === "stop" ? (this.turnOutput.stopReason ?? "stop") : reason;
@@ -141,6 +138,8 @@ export class Run {
 export class BridgeRuntime {
   activeRun: Run | null = null;
   sharedSession: { sessionId: string; cursor: number; cwd: string } | null = null;
+  currentPiSessionId: string | null = null;
+  currentCwd: string | null = null;
 
   startRun(stream: AssistantMessageEventStream, model: Model<any>) {
     const run = new Run(stream, model);
@@ -163,6 +162,7 @@ export class BridgeRuntime {
     diag("abort_active_run", { runId: run.id, state: run.state, reason });
     run.state = "aborted";
     this.clearSharedSession();
+    clearBridgeSessionLink(run.piSessionId);
     // close() is the SDK's forceful abort primitive. Calling interrupt()
     // immediately before close() races a control write against a closing stdin
     // pipe and can surface as EPIPE on cancellation/reload.
