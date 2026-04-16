@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { loadBridgeSession, persistBridgeSessionLink, touchBridgeSession, clearBridgeSessionLink } from "./linkage";
@@ -7,7 +8,7 @@ import { setDebug, debug } from "./logging";
 import { MODELS, PROVIDER_ID } from "./models";
 import { BridgeRuntime } from "./runtime";
 import { createProvider } from "./provider";
-import { buildBridgeStatus, findDuplicateBridgeInstalls } from "./status";
+import { buildBridgeDoctor, buildBridgeStatus, getStartupHealth, showCommandOutput } from "./status";
 
 function readPiSessionId(sessionFile?: string): string | undefined {
   if (!sessionFile) return undefined;
@@ -25,8 +26,8 @@ export default function (pi: ExtensionAPI) {
   const config = loadConfig(process.cwd());
   setDebug(Boolean(config.debug));
   const runtime = new BridgeRuntime();
-  const extensionPath = fileURLToPath(import.meta.url);
-  let duplicateWarningShown = false;
+  const extensionDir = dirname(fileURLToPath(import.meta.url));
+  let startupWarningShown = false;
 
   debug("loading", { provider: PROVIDER_ID, profile: config.behaviorProfile });
 
@@ -43,10 +44,11 @@ export default function (pi: ExtensionAPI) {
     runtime.currentPiSessionId = piSessionId;
     runtime.currentCwd = cwd;
 
-    const duplicates = findDuplicateBridgeInstalls(cwd);
-    if (!duplicateWarningShown && duplicates.sources.length > 1) {
-      duplicateWarningShown = true;
-      ctx.ui.notify(`pi-cc-bridge duplicate installs detected: ${duplicates.sources.join(" | ")}`, "warning");
+    const startupHealth = getStartupHealth(cwd);
+    if (ctx.hasUI) ctx.ui.setStatus("pi-cc-bridge", startupHealth.text);
+    if (ctx.hasUI && !startupWarningShown && startupHealth.notify) {
+      startupWarningShown = true;
+      ctx.ui.notify(startupHealth.notify, startupHealth.severity === "fatal" ? "error" : "warning");
     }
 
     if (event.reason === "resume") {
@@ -86,8 +88,16 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("pi-cc-bridge-status", {
     description: "Show pi-cc-bridge session/linkage status",
     handler: async (_args, ctx) => {
-      const lines = await buildBridgeStatus(runtime, ctx, extensionPath);
-      await ctx.ui.select("pi-cc-bridge status", lines);
+      const lines = await buildBridgeStatus(runtime, ctx, extensionDir);
+      await showCommandOutput("pi-cc-bridge status", lines, ctx);
+    },
+  });
+
+  pi.registerCommand("pi-cc-bridge-doctor", {
+    description: "Run pi-cc-bridge health checks",
+    handler: async (_args, ctx) => {
+      const lines = await buildBridgeDoctor(runtime, ctx, extensionDir);
+      await showCommandOutput("pi-cc-bridge doctor", lines, ctx);
     },
   });
 

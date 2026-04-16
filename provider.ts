@@ -8,22 +8,21 @@ import type {
 import { query, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { BridgeConfig } from "./config";
 import { debug, diag } from "./logging";
-import { clearBridgeSessionLink, loadBridgeSession, persistBridgeSessionLink, setBridgeSessionState, touchBridgeSession } from "./linkage";
+import { clearBridgeSessionLink, persistBridgeSessionLink, setBridgeSessionState, touchBridgeSession } from "./linkage";
 import { compileSystemPrompt } from "./prompt";
 import { BridgeRuntime, updateUsage } from "./runtime";
+import { assertNoFatalDuplicateInstall } from "./status";
+import { continueActiveRun, resolveContinuationPlan } from "./continuation";
 import {
   DISALLOWED_BUILTIN_TOOLS,
   buildMcpServers,
-  extractAllToolResults,
   extractUserPrompt,
   extractUserPromptBlocks,
   mapToolArgs,
   mapToolName,
-  renderReplayTranscript,
   resolveMcpTools,
   wrapPromptStream,
   wrapReplayPromptStream,
-  type McpResult,
 } from "./tools";
 
 const _piAi = piAi as any;
@@ -341,38 +340,29 @@ export function createProvider(runtime: BridgeRuntime, config: BridgeConfig) {
   return function streamSimple(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
     const stream = newAssistantMessageEventStream();
     const lastMessage = context.messages[context.messages.length - 1];
+    const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
 
-    const activeRun = runtime.activeRun;
-    if (activeRun) {
-      if (lastMessage?.role === "toolResult") {
-        const results = extractAllToolResults(context);
-        activeRun.stream = stream;
-        activeRun.resetTurn(model);
-        activeRun.state = "continuing";
-        for (const result of results) {
-          const id = result.toolCallId;
-          if (!id) continue;
-          if (activeRun.pendingToolCalls.has(id)) {
-            const pending = activeRun.pendingToolCalls.get(id)!;
-            activeRun.pendingToolCalls.delete(id);
-            pending.resolve(result as McpResult);
-          } else {
-            activeRun.pendingResults.set(id, result as McpResult);
-          }
-        }
-        return stream;
-      }
+    try {
+      assertNoFatalDuplicateInstall(cwd);
+    } catch (error) {
+      const duplicateError = error instanceof Error ? error.message : String(error);
+      queueMicrotask(() => {
+        stream.push({ type: "error", reason: "error", error: bridgeErrorMessage(model, duplicateError) as any });
+        stream.end();
+      });
+      return stream;
+    }
 
-      if (lastMessage?.role === "user") {
-        debug("abandoning stale active run", { runId: activeRun.id, state: activeRun.state });
-        runtime.abortActiveRun("Superseded by new user message");
-      } else {
+    const continuation = continueActiveRun(runtime, context, stream, model);
+    if (continuation.handled) {
+      if (continuation.errorText) {
+        const continuationError = continuation.errorText;
         queueMicrotask(() => {
-          stream.push({ type: "error", reason: "error", error: bridgeErrorMessage(model, "Bridge was waiting for tool results but none were provided.") as any });
+          stream.push({ type: "error", reason: "error", error: bridgeErrorMessage(model, continuationError) as any });
           stream.end();
         });
-        return stream;
       }
+      return stream;
     }
 
     if (!lastMessage || lastMessage.role !== "user") {
@@ -384,7 +374,6 @@ export function createProvider(runtime: BridgeRuntime, config: BridgeConfig) {
     }
 
     const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context);
-    const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
     const piSessionId = options?.sessionId ?? runtime.currentPiSessionId ?? undefined;
     const priorMessages = context.messages.slice(0, -1);
     const promptBlocks = extractUserPromptBlocks(context.messages);
@@ -393,38 +382,11 @@ export function createProvider(runtime: BridgeRuntime, config: BridgeConfig) {
     void (async () => {
       await touchBridgeSession(piSessionId, cwd, model.provider, model.id);
 
-      let shared = runtime.sharedSession;
-      if (!shared) {
-        const persisted = await loadBridgeSession(piSessionId);
-        if (persisted?.state === "waiting_tool_results") {
-          await clearBridgeSessionLink(piSessionId);
-        } else if (persisted?.liveClaudeSessionId && persisted.cwd === cwd) {
-          shared = { sessionId: persisted.liveClaudeSessionId, cursor: persisted.liveCursor, cwd: persisted.cwd };
-          runtime.sharedSession = shared;
-        }
-      }
-
       const run = runtime.startRun(stream, model);
       run.piSessionId = piSessionId;
       run.cwd = cwd;
       const mcpServers = buildMcpServers(run, mcpTools);
-      let resumeSessionId: string | undefined;
-      let replayTranscript: string | undefined;
-
-      if (shared && shared.cwd === cwd) {
-        const missed = priorMessages.slice(shared.cursor);
-        const trailingAssistantOnly = missed.length === 1 && (missed[0] as { role?: string }).role === "assistant";
-        if (missed.length === 0 || trailingAssistantOnly) {
-          resumeSessionId = shared.sessionId;
-          if (trailingAssistantOnly) {
-            runtime.sharedSession = { ...shared, cursor: priorMessages.length };
-          }
-        }
-      }
-
-      if (!resumeSessionId && priorMessages.length > 0) {
-        replayTranscript = renderReplayTranscript(priorMessages);
-      }
+      const { resumeSessionId, replayTranscript } = await resolveContinuationPlan(runtime, piSessionId, cwd, priorMessages);
 
       const prompt = replayTranscript
         ? wrapReplayPromptStream(replayTranscript, promptBlocks ?? promptText)

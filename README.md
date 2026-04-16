@@ -91,10 +91,18 @@ Logs:
 - `~/.pi/agent/pi-cc-bridge.log`
 - `~/.pi/agent/pi-cc-bridge-diag.log`
 
-Interactive command:
+Commands:
 
 ```text
 /pi-cc-bridge-status
+/pi-cc-bridge-doctor
+```
+
+Print mode also works:
+
+```bash
+pi -p "/pi-cc-bridge-status"
+pi -p "/pi-cc-bridge-doctor"
 ```
 
 ## Smoke test
@@ -102,6 +110,16 @@ Interactive command:
 ```bash
 npm run smoke
 ```
+
+## Troubleshooting
+
+If the bridge acts weird, check these first:
+
+- run `/pi-cc-bridge-doctor`
+- make sure only one `pi-cc-bridge` source is installed
+- confirm `claude auth status`
+- make sure `defaultProvider` is `pi-cc-bridge` if that is what you want
+- rerun `npm run smoke`
 
 ## Credits
 
