@@ -10,6 +10,7 @@ export type RunState =
   | "waiting_tool_results"
   | "continuing"
   | "done"
+  | "superseded"
   | "aborted"
   | "error";
 
@@ -140,6 +141,7 @@ export class BridgeRuntime {
   sharedSession: { sessionId: string; cursor: number; cwd: string } | null = null;
   currentPiSessionId: string | null = null;
   currentCwd: string | null = null;
+  lastStartupPrunedRows = 0;
 
   startRun(stream: AssistantMessageEventStream, model: Model<any>) {
     const run = new Run(stream, model);
@@ -156,11 +158,12 @@ export class BridgeRuntime {
     this.sharedSession = null;
   }
 
-  abortActiveRun(reason = "Operation aborted") {
+  abortActiveRun(reason = "Operation aborted", options?: { classification?: "aborted" | "superseded" }) {
     const run = this.activeRun;
     if (!run) return;
-    diag("abort_active_run", { runId: run.id, state: run.state, reason });
-    run.state = "aborted";
+    const classification = options?.classification ?? (reason === "Superseded by new user message" ? "superseded" : "aborted");
+    diag(classification === "superseded" ? "superseded_waiting_tool_results" : "abort_active_run", { runId: run.id, state: run.state, reason });
+    run.state = classification === "superseded" ? "superseded" : "aborted";
     this.clearSharedSession();
     clearBridgeSessionLink(run.piSessionId);
     // close() is the SDK's forceful abort primitive. Calling interrupt()

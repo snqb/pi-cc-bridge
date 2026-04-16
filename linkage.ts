@@ -217,3 +217,27 @@ export async function clearBridgeSessionLink(piSessionId: string | undefined) {
     args: [now(), piSessionId],
   });
 }
+
+export async function countBridgeSessions() {
+  const client = await getClient();
+  if (!client) return 0;
+  const result = await executeWithRetry(client, `SELECT COUNT(*) AS count FROM bridge_sessions`);
+  const count = result.rows[0]?.count;
+  return typeof count === "number" ? count : Number(count ?? 0);
+}
+
+export async function pruneBridgeSessions(options?: { idleOlderThanDays?: number }) {
+  const client = await getClient();
+  if (!client) return 0;
+  const idleOlderThanDays = options?.idleOlderThanDays ?? 30;
+  const cutoff = new Date(Date.now() - idleOlderThanDays * 24 * 60 * 60 * 1000).toISOString();
+  const result = await executeWithRetry(client, {
+    sql: `
+      DELETE FROM bridge_sessions
+      WHERE state = 'idle'
+        AND updated_at < ?
+    `,
+    args: [cutoff],
+  });
+  return Number((result as any).rowsAffected ?? 0);
+}

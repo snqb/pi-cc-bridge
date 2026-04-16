@@ -1,8 +1,12 @@
 # pi-cc-bridge
 
-`pi-cc-bridge` lets Pi use Claude as the model engine without giving up the normal Pi workflow.
+**Claude Code as engine. Pi as host.**
 
-Pi stays in charge. Pi tools stay real. Claude does the reasoning.
+`pi-cc-bridge` lets you use Claude from Pi through your existing Claude Code setup.
+
+Claude Code remains the authenticated path. Pi remains the host, tool runner, and session manager.
+
+The result is simple: you keep Pi’s tools, workflows, and extensibility, while Claude handles the reasoning.
 
 ## Install
 
@@ -34,6 +38,20 @@ If you want Claude to be the default for Pi, set this in your settings:
 
 Start a fresh Pi process after installing or changing the default provider.
 
+## Why this exists
+
+`pi-cc-bridge` takes a conservative route to Claude integration.
+
+Instead of replacing Claude Code auth or relying on unofficial session hacks, it uses your existing Claude Code setup and lets Pi provide the outer orchestration layer.
+
+This became more useful as Claude access patterns shifted and external integrations became less predictable for some users. If you want Pi’s tools and workflow without leaving the Claude Code path, this bridge exists for that gap.
+
+Further reading:
+
+- Claude Code overview: https://docs.anthropic.com/en/docs/claude-code/overview
+- Public Claude Code auth/access issue: https://github.com/anthropics/claude-code/issues/6687
+- Another public login/access thread: https://github.com/anthropics/claude-code/issues/45886
+
 ## Authentication
 
 `pi-cc-bridge` does **not** add a separate Pi-side login flow.
@@ -55,7 +73,7 @@ In practice:
 
 - uses Claude through the Claude Agent SDK
 - keeps Pi-side tools working: `read`, `bash`, `edit`, `write`, memory, browser, subagents, interactive shell, custom tools
-- keeps the default feel closer to Pi than to Claude Code
+- keeps Pi as the host, tool runner, and orchestration layer
 - supports both normal follow-ups and fresh-process Pi session resume
 
 ## How it works
@@ -96,6 +114,8 @@ Commands:
 ```text
 /pi-cc-bridge-status
 /pi-cc-bridge-doctor
+/pi-cc-bridge-report [days]
+/pi-cc-bridge-cleanup
 ```
 
 Print mode also works:
@@ -103,6 +123,8 @@ Print mode also works:
 ```bash
 pi -p "/pi-cc-bridge-status"
 pi -p "/pi-cc-bridge-doctor"
+pi -p "/pi-cc-bridge-report 7"
+pi -p "/pi-cc-bridge-cleanup"
 ```
 
 ## Smoke test
@@ -116,9 +138,11 @@ npm run smoke
 If the bridge acts weird, check these first:
 
 - run `/pi-cc-bridge-doctor`
+- run `/pi-cc-bridge-report 7` to see recent sessions, errors, and 5xx counts
 - make sure only one `pi-cc-bridge` source is installed
 - confirm `claude auth status`
 - make sure `defaultProvider` is `pi-cc-bridge` if that is what you want
+- run `/pi-cc-bridge-cleanup` if you want to prune stale linkage rows
 - rerun `npm run smoke`
 
 ## Credits

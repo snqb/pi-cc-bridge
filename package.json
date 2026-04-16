@@ -35,7 +35,7 @@
   "scripts": {
     "clean": "echo 'nothing to clean'",
     "build": "echo 'nothing to build'",
-    "check": "tsc --noEmit --target ES2022 --module ESNext --moduleResolution Bundler --skipLibCheck index.ts provider.ts continuation.ts runtime.ts tools.ts config.ts logging.ts models.ts prompt.ts status.ts linkage.ts",
+    "check": "tsc --noEmit --target ES2022 --module ESNext --moduleResolution Bundler --skipLibCheck index.ts provider.ts continuation.ts report.ts runtime.ts tools.ts config.ts logging.ts models.ts prompt.ts status.ts linkage.ts",
     "smoke": "bash ./scripts/regression.sh"
   },
   "dependencies": {

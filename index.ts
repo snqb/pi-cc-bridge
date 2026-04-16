@@ -2,13 +2,13 @@ import { readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { loadBridgeSession, persistBridgeSessionLink, touchBridgeSession, clearBridgeSessionLink } from "./linkage";
+import { loadBridgeSession, persistBridgeSessionLink, touchBridgeSession, clearBridgeSessionLink, pruneBridgeSessions } from "./linkage";
 import { loadConfig } from "./config";
 import { setDebug, debug } from "./logging";
 import { MODELS, PROVIDER_ID } from "./models";
 import { BridgeRuntime } from "./runtime";
 import { createProvider } from "./provider";
-import { buildBridgeDoctor, buildBridgeStatus, getStartupHealth, showCommandOutput } from "./status";
+import { buildBridgeCleanup, buildBridgeDoctor, buildBridgeStatus, buildBridgeUsageReport, getStartupHealth, showCommandOutput } from "./status";
 
 function readPiSessionId(sessionFile?: string): string | undefined {
   if (!sessionFile) return undefined;
@@ -43,6 +43,10 @@ export default function (pi: ExtensionAPI) {
     const cwd = ctx.sessionManager.getCwd();
     runtime.currentPiSessionId = piSessionId;
     runtime.currentCwd = cwd;
+
+    if (event.reason === "startup") {
+      runtime.lastStartupPrunedRows = await pruneBridgeSessions();
+    }
 
     const startupHealth = getStartupHealth(cwd);
     if (ctx.hasUI) ctx.ui.setStatus("pi-cc-bridge", startupHealth.text);
@@ -98,6 +102,23 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       const lines = await buildBridgeDoctor(runtime, ctx, extensionDir);
       await showCommandOutput("pi-cc-bridge doctor", lines, ctx);
+    },
+  });
+
+  pi.registerCommand("pi-cc-bridge-report", {
+    description: "Summarize recent pi-cc-bridge usage and errors",
+    handler: async (args, ctx) => {
+      const windowDays = Number.parseInt(args.trim() || "7", 10);
+      const lines = await buildBridgeUsageReport(Number.isFinite(windowDays) && windowDays > 0 ? windowDays : 7);
+      await showCommandOutput("pi-cc-bridge report", lines, ctx);
+    },
+  });
+
+  pi.registerCommand("pi-cc-bridge-cleanup", {
+    description: "Prune stale pi-cc-bridge linkage rows",
+    handler: async (_args, ctx) => {
+      const lines = await buildBridgeCleanup(runtime);
+      await showCommandOutput("pi-cc-bridge cleanup", lines, ctx);
     },
   });
 

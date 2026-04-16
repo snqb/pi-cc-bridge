@@ -76,6 +76,19 @@ expect_contains "$out" "doctorStatus:" "doctor-status"
 expect_contains "$out" "claudeAuth:" "doctor-auth"
 expect_contains "$out" "duplicates:" "doctor-duplicates"
 
+REPORT_DIR="$TMP_ROOT/report"
+mkdir -p "$REPORT_DIR"
+out=$(run_pi "$REPORT_DIR" "/pi-cc-bridge-report 30")
+expect_contains "$out" "reportWindowDays: 30" "report-window"
+expect_contains "$out" "providerSessions:" "report-sessions"
+expect_contains "$out" "topErrors:" "report-errors"
+
+CLEANUP_DIR="$TMP_ROOT/cleanup"
+mkdir -p "$CLEANUP_DIR"
+out=$(run_pi "$CLEANUP_DIR" "/pi-cc-bridge-cleanup")
+expect_contains "$out" "prunedRows:" "cleanup-pruned"
+expect_contains "$out" "sqliteRowCount:" "cleanup-rows"
+
 DUP_PROJECT="$TMP_ROOT/duplicate-project"
 mkdir -p "$DUP_PROJECT/.pi" "$TMP_ROOT/duplicate-session"
 cat > "$DUP_PROJECT/.pi/settings.json" <<'JSON'
@@ -99,5 +112,11 @@ if [[ "$code" -eq 0 ]]; then
   exit 1
 fi
 expect_contains "$out" "pi-cc-bridge refused to run" "provider-duplicate-hard-fail"
+
+if rg -n -S "Bridge expected a user message to start a query\.|Bridge was waiting for tool results but none were provided\." "$TMP_ROOT" >/dev/null; then
+  echo "[legacy-internal-errors] found legacy internal bridge error text in temp sessions" >&2
+  exit 1
+fi
+echo "PASS: legacy-internal-errors"
 
 echo "All regression checks passed."

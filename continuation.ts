@@ -45,13 +45,13 @@ export function continueActiveRun(
 
   if (lastMessage?.role === "user") {
     debug("abandoning stale active run", { runId: activeRun.id, state: activeRun.state });
-    runtime.abortActiveRun("Superseded by new user message");
+    runtime.abortActiveRun("Superseded by new user message", { classification: "superseded" });
     return { handled: false };
   }
 
   return {
     handled: true,
-    errorText: "Bridge was waiting for tool results but none were provided.",
+    errorText: "Internal bridge state mismatch: missing tool results for pending continuation.",
   };
 }
 

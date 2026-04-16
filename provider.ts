@@ -37,7 +37,7 @@ const newAssistantMessageEventStream: () => AssistantMessageEventStream =
     ? _piAi.createAssistantMessageEventStream
     : () => new _piAi.AssistantMessageEventStream();
 
-const MAX_TRANSIENT_RETRIES = 2;
+const MAX_TRANSIENT_RETRIES = 3;
 
 function bridgeErrorMessage(model: Model<any>, errorText: string) {
   return {
@@ -71,12 +71,16 @@ function isTransientClaudeError(text: string): boolean {
     || /ECONNRESET|ETIMEDOUT|socket hang up/i.test(text);
 }
 
-function summarizeErrorForUser(text: string): string {
+function summarizeErrorForUser(text: string, options?: { retries?: number }): string {
   const trimmed = text.trim();
   const apiMatch = trimmed.match(/API Error:\s*(\d{3})\b[\s\S]*/i);
   if (apiMatch) {
     const code = apiMatch[1];
-    if (["500", "502", "503", "504"].includes(code)) return `API Error: ${code} · check status.claude.com`;
+    if (["500", "502", "503", "504"].includes(code)) {
+      return options?.retries && options.retries > 0
+        ? `API Error: ${code} · retried ${options.retries}x · check status.claude.com`
+        : `API Error: ${code} · check status.claude.com`;
+    }
     return `API Error: ${code}`;
   }
   if (/OAuth authentication is currently not allowed for this organization/i.test(trimmed)) {
@@ -85,15 +89,21 @@ function summarizeErrorForUser(text: string): string {
   return trimmed.replace(/^Error:\s*/, "");
 }
 
-function setCleanErrorOutput(run: ReturnType<BridgeRuntime["startRun"]>, model: Model<any>, rawErrorText: string) {
+function setCleanErrorOutput(run: ReturnType<BridgeRuntime["startRun"]>, model: Model<any>, rawErrorText: string, options?: { retries?: number }) {
   const error = bridgeErrorMessage(model, rawErrorText) as any;
-  error.content = [{ type: "text", text: summarizeErrorForUser(rawErrorText) }];
+  error.content = [{ type: "text", text: summarizeErrorForUser(rawErrorText, options) }];
   run.turnOutput = error;
   run.turnBlocks = error.content;
 }
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function transientBackoffMs(attempt: number) {
+  const base = 700 * 2 ** (attempt - 1);
+  const jitter = Math.floor(Math.random() * 300);
+  return base + jitter;
 }
 
 function mapStopReason(reason: string | undefined): "stop" | "length" | "toolUse" {
@@ -291,18 +301,24 @@ async function consumeQuery(runtime: BridgeRuntime, run: ReturnType<BridgeRuntim
       const raw = errorMessage(error);
       debug("consumeQuery error", run.id, raw, { attempt });
       runtime.clearSharedSession();
-      const aborted = run.state === "aborted" || run.finalized;
+      const aborted = run.state === "aborted" || run.state === "superseded" || run.finalized;
       const canRetry = !aborted && !run.turnStarted && isTransientClaudeError(raw) && attempt < MAX_TRANSIENT_RETRIES;
       if (canRetry) {
         attempt += 1;
-        diag("transient_retry", { runId: run.id, attempt, error: summarizeErrorForUser(raw) });
+        const delayMs = transientBackoffMs(attempt);
+        diag("transient_retry", { runId: run.id, attempt, delayMs, error: summarizeErrorForUser(raw, { retries: attempt }) });
         run.resetTurn(model);
-        await sleep(500 * attempt);
+        await sleep(delayMs);
         continue;
       }
-      run.state = aborted ? "aborted" : "error";
+      run.state = aborted ? run.state : "error";
       await clearBridgeSessionLink(run.piSessionId);
-      if (!aborted) setCleanErrorOutput(run, model, raw);
+      if (!aborted) {
+        if (isTransientClaudeError(raw) && attempt > 0) {
+          diag("transient_exhausted", { runId: run.id, retries: attempt, error: summarizeErrorForUser(raw, { retries: attempt }) });
+        }
+        setCleanErrorOutput(run, model, raw, { retries: attempt });
+      }
       run.finalize(aborted ? "aborted" : "error", raw);
       runtime.clearRun(run);
       return;
@@ -367,7 +383,7 @@ export function createProvider(runtime: BridgeRuntime, config: BridgeConfig) {
 
     if (!lastMessage || lastMessage.role !== "user") {
       queueMicrotask(() => {
-        stream.push({ type: "error", reason: "error", error: bridgeErrorMessage(model, "Bridge expected a user message to start a query.") as any });
+        stream.push({ type: "error", reason: "error", error: bridgeErrorMessage(model, "Internal bridge state mismatch: missing starting user message.") as any });
         stream.end();
       });
       return stream;

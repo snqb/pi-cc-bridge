@@ -4,8 +4,9 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import { getBridgeDbPath, loadBridgeSession } from "./linkage";
+import { countBridgeSessions, getBridgeDbPath, loadBridgeSession, pruneBridgeSessions } from "./linkage";
 import { PROVIDER_ID } from "./models";
+import { buildBridgeReport, collectBridgeAudit } from "./report";
 import type { BridgeRuntime } from "./runtime";
 
 const require = createRequire(import.meta.url);
@@ -305,6 +306,8 @@ export async function buildBridgeStatus(runtime: BridgeRuntime, ctx: ExtensionCo
   const duplicates = findDuplicateBridgeInstalls(cwd);
   const bridgeVersion = readJsonVersion(BRIDGE_PACKAGE_PATH) ?? "unknown";
   const piVersion = resolvePackageVersion("@mariozechner/pi-coding-agent") ?? "unknown";
+  const sqliteRowCount = await countBridgeSessions();
+  const audit = await collectBridgeAudit(7);
 
   const lines = [
     `provider: ${PROVIDER_ID}`,
@@ -318,11 +321,17 @@ export async function buildBridgeStatus(runtime: BridgeRuntime, ctx: ExtensionCo
     `runtimeSharedSession: ${runtime.sharedSession?.sessionId ?? "(none)"}`,
     `runtimeSharedCursor: ${runtime.sharedSession?.cursor ?? 0}`,
     `sqliteDb: ${getBridgeDbPath()}`,
+    `sqliteRowCount: ${sqliteRowCount}`,
+    `lastStartupPrunedRows: ${runtime.lastStartupPrunedRows}`,
     `sqliteLinkedClaudeSession: ${persisted?.liveClaudeSessionId ?? "(none)"}`,
     `sqliteCursor: ${persisted?.liveCursor ?? 0}`,
     `sqliteState: ${persisted?.state ?? "(none)"}`,
     `duplicateInstallSeverity: ${duplicates.severity}`,
     `duplicateInstallCount: ${duplicates.occurrences.length}`,
+    `recentSupersededToolWaits: ${audit.supersededToolWaits}`,
+    `recentInternalBridgeErrors: ${audit.internalBridgeErrors}`,
+    `recentLegacyInternalBridgeErrors: ${audit.legacyInternalBridgeErrors}`,
+    `recentUpstream5xxErrors: ${audit.upstream5xxErrors}`,
   ];
 
   if (duplicates.occurrences.length) {
@@ -339,6 +348,8 @@ export async function buildBridgeDoctor(runtime: BridgeRuntime, ctx: ExtensionCo
   const cwd = runtime.currentCwd ?? ctx.sessionManager.getCwd();
   const duplicates = findDuplicateBridgeInstalls(cwd);
   const settingsSnapshots = loadSettingsSnapshots(cwd);
+  const audit = await collectBridgeAudit(7);
+  const sqliteRowCount = await countBridgeSessions();
 
   const checks: DoctorCheck[] = [
     checkNodeVersion(),
@@ -349,6 +360,26 @@ export async function buildBridgeDoctor(runtime: BridgeRuntime, ctx: ExtensionCo
       name: "duplicates",
       severity: duplicates.severity,
       detail: duplicates.summary,
+    },
+    {
+      name: "recentInternalErrors",
+      severity: audit.internalBridgeErrors > 0 ? "warning" : "ok",
+      detail: `${audit.internalBridgeErrors} internal bridge state errors in last ${audit.windowDays}d (${audit.legacyInternalBridgeErrors} legacy text)` ,
+    },
+    {
+      name: "recentUpstream5xx",
+      severity: audit.upstream5xxErrors >= 3 ? "warning" : "ok",
+      detail: `${audit.upstream5xxErrors} upstream 5xx errors in last ${audit.windowDays}d`,
+    },
+    {
+      name: "recentSupersededWaits",
+      severity: "ok",
+      detail: `${audit.supersededToolWaits} superseded tool waits in last ${audit.windowDays}d (benign)` ,
+    },
+    {
+      name: "sqliteRows",
+      severity: sqliteRowCount > 1000 ? "warning" : "ok",
+      detail: `${sqliteRowCount} rows in ${getBridgeDbPath()}`,
     },
   ];
 
@@ -368,6 +399,21 @@ export async function buildBridgeDoctor(runtime: BridgeRuntime, ctx: ExtensionCo
   }
 
   return lines;
+}
+
+export async function buildBridgeCleanup(runtime: BridgeRuntime) {
+  const prunedRows = await pruneBridgeSessions();
+  runtime.lastStartupPrunedRows = prunedRows;
+  const sqliteRowCount = await countBridgeSessions();
+  return [
+    `prunedRows: ${prunedRows}`,
+    `sqliteRowCount: ${sqliteRowCount}`,
+    `sqliteDb: ${getBridgeDbPath()}`,
+  ];
+}
+
+export async function buildBridgeUsageReport(windowDays = 7) {
+  return buildBridgeReport(windowDays);
 }
 
 export async function showCommandOutput(title: string, lines: string[], ctx: ExtensionCommandContext) {
